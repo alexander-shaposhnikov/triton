@@ -98,8 +98,9 @@ private:
 class geper{
 public:
   geper(Builder** builder): builder_(builder) { }
+  Value* operator()(Type *ty, Value *ptr, Value* off, const std::string& name = "");
   Value* operator()(Value *ptr, Value* off, const std::string& name = "");
-  Value* operator()(Type* ty, Value*ptr, std::vector<Value*> vals, const std::string& name = "");
+  Value* operator()(Type* ty, Value *ptr, std::vector<Value*> vals, const std::string& name = "");
 
 private:
   Builder** builder_;

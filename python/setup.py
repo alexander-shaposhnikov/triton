@@ -53,7 +53,7 @@ def get_thirdparty_packages(triton_cache_path):
     if not use_system_llvm():
         # download LLVM if no suitable system LLVM is installed
         packages.append(
-            Package("llvm", "clang+llvm-11.0.1-x86_64-linux-gnu-ubuntu-16.04", "https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.1/clang+llvm-11.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz", "lib", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR")
+            Package("llvm", "clang+llvm-15.0.6-x86_64-linux-gnu-ubuntu-18.04", "https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.6/clang+llvm-15.0.6-x86_64-linux-gnu-ubuntu-18.04.tar.xz", "lib", "LLVM_INCLUDE_DIRS", "LLVM_LIBRARY_DIR")
         )
 
     thirdparty_cmake_args = []

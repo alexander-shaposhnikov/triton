@@ -60,12 +60,28 @@ Value* multiplier::operator()(Value *x, Value *y, const std::string &name) {
   return (*builder_)->CreateMul(x, y, name);
 }
 
+
+// shal1t7
+Value* geper::operator()(Type *ty, Value *ptr, Value* off, const std::string& name) {
+  return (*builder_)->CreateGEP(ty, ptr, off, name);
+}
+
+/*
 Value* geper::operator()(Value *ptr, Value* off, const std::string& name){
+  // shal1t7
+  // simplify (temporarily)
+  Type *my_ty = ptr->getType()->getScalarType()->getPointerElementType();
+  return (*builder_)->CreateGEP(my_ty, ptr, off, name);
+
+
   // (ptr + cst1) + (cst2) -> ptr + (cst1 + cst2)
   if(auto* gep = dyn_cast<GetElementPtrInst>(ptr))
   if(ConstantInt* cst1 = dyn_cast<ConstantInt>(gep->idx_begin()))
   if(ConstantInt* cst2 = dyn_cast<ConstantInt>(off)){
-    return (*builder_)->CreateGEP(gep->getPointerOperand()->getType()->getScalarType()->getPointerElementType(),
+    //return (*builder_)->CreateGEP(gep->getPointerOperand()->getType()->getScalarType()->getPointerElementType(),
+    //                              gep->getPointerOperand(), (*builder_)->CreateAdd(cst1, cst2));
+    // shal1t7
+    return (*builder_)->CreateGEP(gep->getSourceElementType(), //gep->getPointerOperand()->getType()->getScalarType()->getPointerElementType(),
                                   gep->getPointerOperand(), (*builder_)->CreateAdd(cst1, cst2));
   }
   // ptr + (off + cst) -> (ptr + off) + cst
@@ -81,10 +97,11 @@ Value* geper::operator()(Value *ptr, Value* off, const std::string& name){
   return (*builder_)->CreateGEP(ptr->getType()->getScalarType()->getPointerElementType(),
                                 ptr, off, name);
 }
+*/
 
-//Value* geper::operator()(Type *ty, Value *ptr, std::vector<Value *> vals, const std::string &name) {
-//  return (*builder_)->CreateGEP(ty, ptr, vals, name);
-//}
+Value* geper::operator()(Type *ty, Value *ptr, std::vector<Value *> vals, const std::string &name) {
+  return (*builder_)->CreateGEP(ty, ptr, vals, name);
+}
 
 // types
 #define void_ty              builder_->getVoidTy()
@@ -130,7 +147,8 @@ Value* geper::operator()(Value *ptr, Value* off, const std::string& name){
 #define icmp_ult(...)        builder_->CreateICmpULT(__VA_ARGS__)
 #define insert_elt(...)      builder_->CreateInsertElement(__VA_ARGS__)
 #define intrinsic(...)       builder_->CreateIntrinsic(__VA_ARGS__)
-#define load(ptr)            builder_->CreateLoad(ptr->getType()->getPointerElementType(), ptr)
+//#define load(ptr)            builder_->CreateLoad(ptr->getType()->getPointerElementType(), ptr)
+#define my_load(ty, ptr)     builder_->CreateLoad(ty, ptr)
 #define lshr(...)            builder_->CreateLShr(__VA_ARGS__)
 #define max_num(...)         builder_->CreateMaxNum(__VA_ARGS__)
 #define min_num(...)         builder_->CreateMinNum(__VA_ARGS__)
@@ -218,8 +236,8 @@ generator::generator(analysis::axes *a_axes,
                     analysis::swizzle *swizzle,
                     target *tgt,
                     unsigned num_warps)
-  : a_axes_(a_axes), layouts_(layouts), alignment_(alignment), alloc_(alloc), swizzle_(swizzle),
-    tgt_(tgt), num_warps_(num_warps), add(&builder_), mul(&builder_), gep(&builder_) {
+  : a_axes_(a_axes), swizzle_(swizzle), tgt_(tgt), layouts_(layouts), alignment_(alignment),
+    alloc_(alloc), num_warps_(num_warps), add(&builder_), mul(&builder_), gep(&builder_) {
 
 }
 
@@ -231,6 +249,8 @@ void generator::visit_value(ir::value* v) {
     return;
   if(v->get_type()->is_block_ty()){
     if(analysis::shared_layout* layout = layouts_->get(v)->to_shared()){
+      Type* ty = cvt(layout->get_type());
+
       analysis::N_buffer_info_t *n_buffer = layout->get_N_buffer();
       analysis::double_buffer_info_t *double_buffer = layout->get_double_buffer();
 
@@ -249,11 +269,12 @@ void generator::visit_value(ir::value* v) {
         if (std::find(n_buffer->firsts.begin(), n_buffer->firsts.end(), v) != n_buffer->firsts.end()) {
           int write_smem_idx = /*stage_idx*/n_buffer->firsts_idx.at(v);
           int elements = write_smem_idx * layout->get_per_stage_elements();
-          ptr = gep(shared_pre_ptr_[layout], i32(elements));
+          ptr = gep(ty, shared_pre_ptr_[layout], i32(elements));
         } else if (v == n_buffer->latch) {
           Value* write_smem_idx = write_smem_idx_[layout];
           Value* elements = mul(write_smem_idx, i32(layout->get_per_stage_elements()));
-          ptr = gep(shared_pre_ptr_[layout], elements);
+          // shal1t7 (broken)
+          ptr = gep(ty, shared_pre_ptr_[layout], elements);
         }
       } else if (double_buffer) {
         if(v == double_buffer->phi)
@@ -316,10 +337,13 @@ void generator::visit_launch_inst(ir::launch_inst *launch) {
                                            ArrayType::get(builder_->getInt32Ty(), 3),
                                            ArrayType::get(builder_->getInt32Ty(), 3),
                                            builder_->getInt32Ty()};
-  FunctionType* get_param_ty = FunctionType::get(PointerType::get(builder_->getInt8Ty(), 0), get_param_arg_tys, false);
+  Type* get_param_return_ty = PointerType::get(builder_->getInt8Ty(), 0);
+  FunctionType* get_param_ty = FunctionType::get(get_param_return_ty, get_param_arg_tys, false);
   Function* get_param_buffer = Function::Create(get_param_ty, Function::ExternalLinkage, "cudaGetParameterBufferV2", mod_);
-  AllocaInst* grid = builder_->CreateAlloca(get_param_arg_tys[1]);
-  AllocaInst* block = builder_->CreateAlloca(get_param_arg_tys[2]);
+  Type* grid_ty = get_param_arg_tys[1];
+  Type* block_ty = get_param_arg_tys[2];
+  AllocaInst* grid = builder_->CreateAlloca(grid_ty);
+  AllocaInst* block = builder_->CreateAlloca(block_ty);
   ConstantInt* _0 = builder_->getInt32(0);
   ConstantInt* _1 = builder_->getInt32(1);
   ConstantInt* _2 = builder_->getInt32(2);
@@ -332,16 +356,16 @@ void generator::visit_launch_inst(ir::launch_inst *launch) {
   builder_->SetInsertPoint(launch_bb);
 
   //
-  builder_->CreateStore(vals_[launch->get_grid()[0]][{}], builder_->CreateGEP(grid, {_0, _0}));
-  builder_->CreateStore(vals_[launch->get_grid()[1]][{}], builder_->CreateGEP(grid, {_0, _1}));
-  builder_->CreateStore(vals_[launch->get_grid()[2]][{}], builder_->CreateGEP(grid, {_0, _2}));
+  builder_->CreateStore(vals_[launch->get_grid()[0]][{}], builder_->CreateGEP(grid_ty, grid, {_0, _0}));
+  builder_->CreateStore(vals_[launch->get_grid()[1]][{}], builder_->CreateGEP(grid_ty, grid, {_0, _1}));
+  builder_->CreateStore(vals_[launch->get_grid()[2]][{}], builder_->CreateGEP(grid_ty, grid, {_0, _2}));
   Value* num_warps = mul(builder_->getInt32(32), vals_[launch->get_num_warps()][{}]);
-  builder_->CreateStore(num_warps, builder_->CreateGEP(block, {_0, _0}));
-  builder_->CreateStore(builder_->getInt32(1), builder_->CreateGEP(block, {_0, _1}));
-  builder_->CreateStore(builder_->getInt32(1), builder_->CreateGEP(block, {_0, _2}));
+  builder_->CreateStore(num_warps, builder_->CreateGEP(block_ty, block, {_0, _0}));
+  builder_->CreateStore(builder_->getInt32(1), builder_->CreateGEP(block_ty, block, {_0, _1}));
+  builder_->CreateStore(builder_->getInt32(1), builder_->CreateGEP(block_ty, block, {_0, _2}));
   Function* called_fn = fns_[fn];
   Value* callee = ConstantExpr::getCast(Instruction::BitCast, called_fn, get_param_arg_tys[0]);
-  Value* arg_ptr = builder_->CreateCall(get_param_buffer, {callee, builder_->CreateLoad(grid), builder_->CreateLoad(block), builder_->getInt32(0)});
+  Value* arg_ptr = builder_->CreateCall(get_param_buffer, {callee, builder_->CreateLoad(grid_ty, grid), builder_->CreateLoad(block_ty, block), builder_->getInt32(0)});
   // forwrd-declare cudaLaunchDeviceV2
   std::vector<Type*> launch_device_arg_tys = {get_param_ty->getReturnType(), builder_->getInt64Ty()};
   FunctionType* launch_device_ty = FunctionType::get(builder_->getInt32Ty(), launch_device_arg_tys, false);
@@ -364,7 +388,7 @@ void generator::visit_launch_inst(ir::launch_inst *launch) {
     unsigned size = curr_arg_ty->isPointerTy() ? 8 : curr_arg_ty->getPrimitiveSizeInBits() / 8;
     off = (off + size - 1) / size * size;
     // get pointer to current arg
-    Value* curr_arg_ptr = builder_->CreateGEP(arg_ptr, builder_->getInt32(off));
+    Value* curr_arg_ptr = builder_->CreateGEP(get_param_return_ty, arg_ptr, builder_->getInt32(off));
     curr_arg_ptr = builder_->CreateBitCast(curr_arg_ptr, curr_arg_ty->getPointerTo(addr_space));
     // store arg
     builder_->CreateStore(curr_arg, curr_arg_ptr);
@@ -464,11 +488,12 @@ void generator::visit_binary_operator(ir::binary_operator*x) {
 void generator::visit_getelementptr_inst(ir::getelementptr_inst* x) {
   for(indices_t idx: idxs_.at(x)){
     Value *ptr = vals_[x->get_pointer_operand()][idx];
+    Type *ty = cvt(x->get_source_elt_ty());
     std::vector<Value*> vals;
     for(auto it= x->idx_begin(); it != x->idx_end(); it++)
       vals.push_back(vals_[*it][idx]);
     assert(vals.size() == 1);
-    vals_[x][idx] = gep(ptr, vals[0]);
+    vals_[x][idx] = gep(ty, ptr, vals[0]);
   }
 }
 
@@ -607,7 +632,7 @@ std::tuple<Value*, Value*, Value*, Value*> generator::fp16x4_to_fp8x4(Value *in0
    * output if it is). If we were willing to assume the most significant exponent was never set
    * we could save the first two lop3.b32 instructions below.
    */
-  InlineAsm *ptx = InlineAsm::get(FunctionType::get({vec_ty(i8_ty, 4)}, {i32_ty, i32_ty}, false),
+  InlineAsm *ptx = InlineAsm::get(FunctionType::get(vec_ty(i8_ty, 4), {i32_ty, i32_ty}, false),
   "{"
   ".reg .b32 a<2>, b<2>;                  \n\t"
   "shl.b32 a0, $1, 1;                     \n\t" // a0 = input0 << 1
@@ -684,7 +709,7 @@ std::tuple<Value*, Value*, Value*, Value*> generator::bf16x4_to_fp8x4(Value *in0
      fp8 = (nosign(bf16) - (112 << 7) + 0x8) << 4;
      return fp8 | sign;  // also permute bytes
   */
-  InlineAsm *ptx = InlineAsm::get(FunctionType::get({vec_ty(i8_ty, 4)}, {i32_ty, i32_ty}, false),
+  InlineAsm *ptx = InlineAsm::get(FunctionType::get(vec_ty(i8_ty, 4), {i32_ty, i32_ty}, false),
   "{\n\t"
   ".reg .u32 sign, sign<2>, nosign, nosign<2>; \n\t"
   ".reg .u32 fp8_min, fp8_max, rn_, zero; \n\t"
@@ -1116,7 +1141,7 @@ void generator::visit_load_inst(ir::load_inst* x){
   BasicBlock *current = builder_->GetInsertBlock();
   Module *module = current->getModule();
   Value *tid = tgt_->get_local_id(module, *builder_, 0);
-  Value *lane = urem(tid, i32(32));
+  //Value *lane = urem(tid, i32(32));
   ir::value *op = x->get_pointer_operand();
   ir::masked_load_inst *mx = dynamic_cast<ir::masked_load_inst*>(x);
   Type* ty  = cvt(op->get_type()->get_scalar_ty()->get_pointer_element_ty());
@@ -1324,7 +1349,7 @@ void generator::visit_store_inst(ir::store_inst * x){
   if(val_op->get_type()->is_block_ty()){
     auto ord = ords_.at(x->get_pointer_operand());
     size_t aln = alignment_->get(ptr_op, ord[0]);
-    size_t nts = axes_.at(a_axes_->get(x->get_pointer_operand(), ord[0])).contiguous;
+    //size_t nts = axes_.at(a_axes_->get(x->get_pointer_operand(), ord[0])).contiguous;
     if(mx){
       size_t max_eq = alignment_->get_cst_info(mx->get_mask_operand())[ord[0]].num_cst;
       max_eq = std::max<size_t>(max_eq, 1);
@@ -1622,7 +1647,7 @@ void generator::visit_atomic_cas_inst(ir::atomic_cas_inst* cas) {
   add_barrier();
   tgt_->add_memfence(module, *builder_);
   Value *atom_ptr;
-  atom_ptr = gep(shmem_, i32(alloc_->offset(layouts_->get(layouts_->tmp(cas)))), "");
+  atom_ptr = gep(cvt(cas->get_type()->get_scalar_ty()), shmem_, i32(alloc_->offset(layouts_->get(layouts_->tmp(cas)))), "");
   atom_ptr = bit_cast(atom_ptr, ptr_ty(cvt(cas->get_type()->get_scalar_ty()), 3));
 //  cond_br(pred, tid_0_bb, tid_0_done_bb);
 //  builder_->SetInsertPoint(tid_0_bb);
@@ -1643,7 +1668,7 @@ void generator::visit_atomic_cas_inst(ir::atomic_cas_inst* cas) {
   call(iasm2, {pred, atom_ptr, old});
   tgt_->add_memfence(module, *builder_);
   add_barrier();
-  vals_[cas][{}] = load(atom_ptr);
+  vals_[cas][{}] = my_load(cvt(cas->get_type()->get_scalar_ty()), atom_ptr);
   add_barrier();
 }
 
@@ -1747,11 +1772,11 @@ void generator::visit_atomic_rmw_inst(ir::atomic_rmw_inst *atom) {
       rmw_msk = builder_->CreateAnd(rmw_msk, icmp_eq(tid, i32(0)));
       Value *old = call(iasm, (ArrayRef<Value*>{rmw_msk, rmw_ptr, rmw_val}));
       Value *atom_ptr;
-      atom_ptr = gep(shmem_, i32(alloc_->offset(layouts_->get(layouts_->tmp(atom)))), "");
+      atom_ptr = gep(Type::getInt8Ty(*ctx_), shmem_, i32(alloc_->offset(layouts_->get(layouts_->tmp(atom)))), "");
       atom_ptr = bit_cast(atom_ptr, ptr_ty(old->getType(), 3));
       store(old, atom_ptr);
       add_barrier();
-      vals_[atom][idx] = load(atom_ptr);
+      vals_[atom][idx] = my_load(ptr_ty(old->getType(), 3), atom_ptr);
       add_barrier();
     }
   }
@@ -1872,9 +1897,9 @@ void generator::visit_mma884(ir::dot_inst* C, ir::value *A, ir::value *B, ir::va
   std::vector<Value*> ptr_b(num_ptr_b);
   std::map<std::pair<int, int>, std::pair<Value*, Value*>> has, hbs;
   for(int i = 0; i < num_ptr_a; i++)
-    ptr_a[i] = gep(shmems_[A], off_a[i]);
+    ptr_a[i] = gep(cvt(layout_a->get_type()), shmems_[A], off_a[i]);
   for(int i = 0; i < num_ptr_b; i++)
-    ptr_b[i] = gep(shmems_[B], off_b[i]);
+    ptr_b[i] = gep(cvt(layout_b->get_type()), shmems_[B], off_b[i]);
 
 
   // initialize accumulators
@@ -1926,16 +1951,17 @@ void generator::visit_mma884(ir::dot_inst* C, ir::value *A, ir::value *B, ir::va
     Value* ptra;
     if(K==0 && is_prefetch){
       if(inc == 0)
-        ptra = gep(shared_pre_ptr_[layout_a], off_a[offidx]);
+        ptra = gep(cvt(layout_a->get_type()), shared_pre_ptr_[layout_a], off_a[offidx]);
       else
-        ptra = gep(shared_next_ptr_[layout_a], off_a[offidx]);
+        ptra = gep(cvt(layout_a->get_type()), shared_next_ptr_[layout_a], off_a[offidx]);
     }
     else
       ptra = ptr_a[offidx];
     int step_am = is_a_row ? m : m / (num_ptr_a)*(num_ptr_a);
     int step_ak = is_a_row ? K / (num_ptr_a*vec_a)*(num_ptr_a*vec_a) : K;
-    Value* pa =  gep(ptra, i32(step_am*stride_rep_m*stride_am + step_ak*stride_ak));
-    Value* ha = load(bit_cast(pa, ptr_ty(vec_ty(i32_ty, vec_a/2), 3)));
+    Value* pa =  gep(cvt(layout_a->get_type()), ptra, i32(step_am*stride_rep_m*stride_am + step_ak*stride_ak));
+    // shal1t7
+    Value* ha = my_load(vec_ty(i32_ty, vec_a/2), pa);
     // record lds that needs to be moved
     if (K == 0 && inc == 1 && is_prefetch)
       prefetch_latch_to_bb_[phiA->get_incoming_value(1)].push_back(ha);
@@ -1957,16 +1983,17 @@ void generator::visit_mma884(ir::dot_inst* C, ir::value *A, ir::value *B, ir::va
     Value* ptrb;
     if(K==0 && is_prefetch){
       if(inc == 0)
-        ptrb = gep(shared_pre_ptr_[layout_b], off_b[offidx]);
+        ptrb = gep(cvt(layout_b->get_type()), shared_pre_ptr_[layout_b], off_b[offidx]);
       else
-        ptrb = gep(shared_next_ptr_[layout_b], off_b[offidx]);
+        ptrb = gep(cvt(layout_b->get_type()), shared_next_ptr_[layout_b], off_b[offidx]);
     } else
       ptrb = ptr_b[offidx];
 
     int stepbn = is_b_row ? n / (num_ptr_b)*(num_ptr_b) : n;
     int stepbk = is_b_row ? K : K / (num_ptr_b*vec_b)*(num_ptr_b*vec_b);
-    Value* pb =   gep(ptrb, i32(stepbn*stride_rep_n*stride_bn + stepbk*stride_bk));
-    Value* hb =   load(bit_cast(pb, ptr_ty(vec_ty(i32_ty, vec_b/2), 3)));
+    Value* pb =   gep(cvt(layout_b->get_type()), ptrb, i32(stepbn*stride_rep_n*stride_bn + stepbk*stride_bk));
+    // shal1t7
+    Value* hb =   my_load(vec_ty(i32_ty, vec_b/2), pb);
     // record lds that needs to be moved
     if (K == 0 && inc == 1 && is_prefetch)
       prefetch_latch_to_bb_[phiB->get_incoming_value(1)].push_back(hb);
@@ -2206,7 +2233,7 @@ public:
   load_x4(int mat0, int mat1, int inc, bool is_prefetch, ir::phi_node *pn,
           Value *pre_ptr, Value *next_ptr, std::vector<Value*> &off, std::vector<Value*> &ptrs,
           FunctionType *ldmatrix_ty, Type *smem_ptr_ty,
-          std::map<ir::value*, std::vector<Value*>> &prefetch_latch_to_bb_) {
+          std::map<ir::value*, std::vector<Value*>> &prefetch_latch_to_bb_, Type *smem_pointee_ty) {
     assert(mat0 % 2 == 0 && mat1 % 2 == 0 && "smem matrix load must be aligned");
     int mat_idx[2] = {mat0, mat1};
     int k = mat_idx[k_order_];
@@ -2222,10 +2249,11 @@ public:
     auto get_ptr = [&](int idx) -> Value* {
       Value *ptr = nullptr;
       if (k == 0 && is_prefetch) {
+        // shal1t7 (unsure about pre_ptr/next_ptr)
         if (inc == 0)
-          ptr = bit_cast(gep(pre_ptr, off.at(idx)), smem_ptr_ty);
+          ptr = bit_cast(gep(smem_pointee_ty, pre_ptr, off.at(idx)), smem_ptr_ty);
         else
-          ptr = bit_cast(gep(next_ptr, off.at(idx)), smem_ptr_ty);
+          ptr = bit_cast(gep(smem_pointee_ty, next_ptr, off.at(idx)), smem_ptr_ty);
       } else
         ptr = ptrs.at(idx);
       return ptr;
@@ -2257,15 +2285,18 @@ public:
       int s_offset_arr_elem = 1 * (s_mat_stride_*s_mat_shape_) * s_stride_;
       Value *elem0, *elem1, *elem2, *elem3;
       if (k_order_ == 1) {
-        elem0 = load(gep(ptr,  i32(s_offset_elem)));
-        elem1 = load(gep(ptr2, i32(s_offset_elem)));
-        elem2 = load(gep(ptr,  i32(s_offset_elem + s_offset_arr_elem)));
-        elem3 = load(gep(ptr2, i32(s_offset_elem + s_offset_arr_elem)));
+        // shal1t7
+        elem0 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr,  i32(s_offset_elem)));
+        elem1 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr2, i32(s_offset_elem)));
+        elem2 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr,  i32(s_offset_elem + s_offset_arr_elem)));
+        elem3 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr2, i32(s_offset_elem + s_offset_arr_elem)));
+
       } else { // for b (k first)
-        elem0 = load(gep(ptr,  i32(s_offset_elem)));
-        elem2 = load(gep(ptr2, i32(s_offset_elem)));
-        elem1 = load(gep(ptr,  i32(s_offset_elem + s_offset_arr_elem)));
-        elem3 = load(gep(ptr2, i32(s_offset_elem + s_offset_arr_elem)));
+        // shal1t7
+        elem0 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr,  i32(s_offset_elem)));
+        elem2 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr2, i32(s_offset_elem)));
+        elem1 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr,  i32(s_offset_elem + s_offset_arr_elem)));
+        elem3 = my_load(smem_pointee_ty, gep(smem_pointee_ty, ptr2, i32(s_offset_elem + s_offset_arr_elem)));
       }
       if (k == 0 && inc == 1 && is_prefetch) {
         prefetch_latch_to_bb_[pn->get_incoming_value(1)].push_back(elem0);
@@ -2300,27 +2331,27 @@ public:
       Value *elem30, *elem31, *elem32, *elem33;
       Value *i8_elems[4*4];
       if (k_order_ == 1) { //
-        i8_elems[0*4 + 0] = load(gep(ptr00, i32(s_offset_elem)));
-        i8_elems[0*4 + 1] = load(gep(ptr01, i32(s_offset_elem)));
-        i8_elems[0*4 + 2] = load(gep(ptr02, i32(s_offset_elem)));
-        i8_elems[0*4 + 3] = load(gep(ptr03, i32(s_offset_elem)));
+        i8_elems[0*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr00, i32(s_offset_elem)));
+        i8_elems[0*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr01, i32(s_offset_elem)));
+        i8_elems[0*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr02, i32(s_offset_elem)));
+        i8_elems[0*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr03, i32(s_offset_elem)));
 
         assert(i8_elems[0*4 + 0]->getType()->isIntegerTy(8));
 
-        i8_elems[1*4 + 0] = load(gep(ptr10, i32(s_offset_elem)));
-        i8_elems[1*4 + 1] = load(gep(ptr11, i32(s_offset_elem)));
-        i8_elems[1*4 + 2] = load(gep(ptr12, i32(s_offset_elem)));
-        i8_elems[1*4 + 3] = load(gep(ptr13, i32(s_offset_elem)));
+        i8_elems[1*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr10, i32(s_offset_elem)));
+        i8_elems[1*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr11, i32(s_offset_elem)));
+        i8_elems[1*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr12, i32(s_offset_elem)));
+        i8_elems[1*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr13, i32(s_offset_elem)));
 
-        i8_elems[2*4 + 0] = load(gep(ptr00, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[2*4 + 1] = load(gep(ptr01, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[2*4 + 2] = load(gep(ptr02, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[2*4 + 3] = load(gep(ptr03, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[2*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr00, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[2*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr01, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[2*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr02, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[2*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr03, i32(s_offset_elem + s_offset_arr_elem)));
 
-        i8_elems[3*4 + 0] = load(gep(ptr10, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 1] = load(gep(ptr11, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 2] = load(gep(ptr12, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 3] = load(gep(ptr13, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr10, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr11, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr12, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr13, i32(s_offset_elem + s_offset_arr_elem)));
 
         for (int m=0; m<4; ++m) {
           for (int e=0; e<4; ++e)
@@ -2328,27 +2359,27 @@ public:
           i32_elems[m] = bit_cast(i8v4_elems[m], i32_ty);
         }
       } else { // for b (k first)
-        i8_elems[0*4 + 0] = load(gep(ptr00, i32(s_offset_elem)));
-        i8_elems[0*4 + 1] = load(gep(ptr01, i32(s_offset_elem)));
-        i8_elems[0*4 + 2] = load(gep(ptr02, i32(s_offset_elem)));
-        i8_elems[0*4 + 3] = load(gep(ptr03, i32(s_offset_elem)));
+        i8_elems[0*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr00, i32(s_offset_elem)));
+        i8_elems[0*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr01, i32(s_offset_elem)));
+        i8_elems[0*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr02, i32(s_offset_elem)));
+        i8_elems[0*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr03, i32(s_offset_elem)));
 
         assert(i8_elems[0*4 + 0]->getType()->isIntegerTy(8));
 
-        i8_elems[2*4 + 0] = load(gep(ptr10, i32(s_offset_elem)));
-        i8_elems[2*4 + 1] = load(gep(ptr11, i32(s_offset_elem)));
-        i8_elems[2*4 + 2] = load(gep(ptr12, i32(s_offset_elem)));
-        i8_elems[2*4 + 3] = load(gep(ptr13, i32(s_offset_elem)));
+        i8_elems[2*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr10, i32(s_offset_elem)));
+        i8_elems[2*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr11, i32(s_offset_elem)));
+        i8_elems[2*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr12, i32(s_offset_elem)));
+        i8_elems[2*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr13, i32(s_offset_elem)));
 
-        i8_elems[1*4 + 0] = load(gep(ptr00, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[1*4 + 1] = load(gep(ptr01, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[1*4 + 2] = load(gep(ptr02, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[1*4 + 3] = load(gep(ptr03, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[1*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr00, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[1*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr01, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[1*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr02, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[1*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr03, i32(s_offset_elem + s_offset_arr_elem)));
 
-        i8_elems[3*4 + 0] = load(gep(ptr10, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 1] = load(gep(ptr11, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 2] = load(gep(ptr12, i32(s_offset_elem + s_offset_arr_elem)));
-        i8_elems[3*4 + 3] = load(gep(ptr13, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 0] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr10, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 1] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr11, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 2] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr12, i32(s_offset_elem + s_offset_arr_elem)));
+        i8_elems[3*4 + 3] = my_load(builder_->getInt8Ty(), gep(builder_->getInt8Ty(), ptr13, i32(s_offset_elem + s_offset_arr_elem)));
 
         for (int m=0; m<4; ++m) {
           for (int e=0; e<4; ++e)
@@ -2456,28 +2487,38 @@ void generator::visit_mma16816(ir::dot_inst* C, ir::value *A, ir::value *B, ir::
   FunctionType *mma_ty = nullptr;
   Type *phi_ty = nullptr;
   Type *smem_ptr_ty = nullptr;
+  // shal1t7
+  Type *smem_pointee_ty = nullptr;
 
   ir::type *A_ir_ty = A->get_type()->get_scalar_ty();
   ir::type *B_ir_ty = B->get_type()->get_scalar_ty();
   if (A_ir_ty->is_fp16_ty() && B_ir_ty->is_fp16_ty()) {
     mma_ty = FunctionType::get(fp32_pack4_ty, std::vector<llvm::Type*>{fp16x2_ty, fp16x2_ty, fp16x2_ty, fp16x2_ty, fp16x2_ty, fp16x2_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty}, false);
     smem_ptr_ty = ptr_ty(f16_ty, 3);
+    // shal1t7
+    smem_pointee_ty = f16_ty;
     ldmatrix_ty = FunctionType::get(fp16x2_pack4_ty, std::vector<llvm::Type*>{smem_ptr_ty}, false);
     phi_ty = fp16x2_ty;
   } else if (A_ir_ty->is_bf16_ty() && B_ir_ty->is_bf16_ty()) {
     mma_ty = FunctionType::get(fp32_pack4_ty, std::vector<llvm::Type*>{bf16x2_ty, bf16x2_ty, bf16x2_ty, bf16x2_ty, bf16x2_ty, bf16x2_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty}, false);
     smem_ptr_ty = ptr_ty(bf16_ty, 3);
+    // shal1t7
+    smem_pointee_ty = bf16_ty;
     ldmatrix_ty = FunctionType::get(bf16x2_pack4_ty, std::vector<llvm::Type*>{smem_ptr_ty}, false);
     phi_ty = bf16x2_ty;
   } else if (A_ir_ty->is_fp32_ty() && B_ir_ty->is_fp32_ty()) {
     mma_ty = FunctionType::get(fp32_pack4_ty, std::vector<llvm::Type*>{fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty, fp32_ty}, false);
     smem_ptr_ty = ptr_ty(fp32_ty, 3);
+    // shal1t7
+    smem_pointee_ty = fp32_ty;
     ldmatrix_ty = FunctionType::get(fp32_pack4_ty, std::vector<llvm::Type*>{smem_ptr_ty}, false);
     phi_ty = fp32_ty;
   } else if (A_ir_ty->is_integer_ty(8) && B_ir_ty->is_integer_ty(8)) {
     // FIXME: We should use i8 here (but nvptx will generate extra casts when using i8)
     mma_ty = FunctionType::get(i32_pack4_ty, std::vector<llvm::Type*>{i32_ty, i32_ty, i32_ty, i32_ty, i32_ty, i32_ty, i32_ty, i32_ty, i32_ty, i32_ty}, false);
     smem_ptr_ty = ptr_ty(i8_ty, 3);
+    // shal1t7
+    smem_pointee_ty = i8_ty;
     ldmatrix_ty = FunctionType::get(i32_pack4_ty, std::vector<llvm::Type*>{smem_ptr_ty}, false);
     phi_ty = i32_ty;
     // mma_ty = FunctionType::get(i32_pack4_ty, std::vector<llvm::Type*>{i8x4_ty, i8x4_ty, i8x4_ty, i8x4_ty, i8x4_ty, i8x4_ty, i32_ty, i32_ty, i32_ty, i32_ty}, false);
@@ -2544,14 +2585,14 @@ void generator::visit_mma16816(ir::dot_inst* C, ir::value *A, ir::value *B, ir::
     if(licm_ptrs)
       builder_->SetInsertPoint(CurrBB);
     for(int i = 0; i < num_ptr_a; i++)
-      ptrs_a[i] = bit_cast(gep(shmems_[A], {off_a[i]}), smem_ptr_ty);
+      ptrs_a[i] = bit_cast(gep(smem_pointee_ty, shmems_[A], {off_a[i]}), smem_ptr_ty);
     if(licm_ptrs)
       builder_->SetInsertPoint(FirstBB->getTerminator());
     // loading function
     load_a = [&,a_loader,ptrs_a,off_a](int m, int k, int inc, bool is_prefetch) mutable {
       auto [ha0, ha1, ha2, ha3] = a_loader.load_x4(m, k, inc, is_prefetch, phiA, shared_pre_ptr_[layout_a],
                                                   shared_next_ptr_[layout_a], off_a, ptrs_a,
-                                                  ldmatrix_ty, smem_ptr_ty, prefetch_latch_to_bb_);
+                                                  ldmatrix_ty, smem_ptr_ty, prefetch_latch_to_bb_, smem_pointee_ty);
       register_lds2(ha, m,   k,   inc, ha0, is_prefetch);
       register_lds2(ha, m+1, k,   inc, ha1, is_prefetch);
       register_lds2(ha, m,   k+1, inc, ha2, is_prefetch);
@@ -2618,7 +2659,7 @@ void generator::visit_mma16816(ir::dot_inst* C, ir::value *A, ir::value *B, ir::
   int num_ptr_b = b_loader.get_num_ptr();
   std::vector<Value*> ptrs_b(num_ptr_b);
   for(int i = 0; i < num_ptr_b; i++)
-    ptrs_b[i] = bit_cast(gep(shmems_[B], {off_b[i]}), smem_ptr_ty);
+    ptrs_b[i] = bit_cast(gep(smem_pointee_ty, shmems_[B], {off_b[i]}), smem_ptr_ty);
 
 
   // loading function
@@ -2626,7 +2667,7 @@ void generator::visit_mma16816(ir::dot_inst* C, ir::value *A, ir::value *B, ir::
   load_b = [&](int n, int k, int inc, bool is_prefetch) {
       auto [hb0, hb1, hb2, hb3] = b_loader.load_x4(k, n, inc, is_prefetch, phiB, shared_pre_ptr_[layout_b],
                                                    shared_next_ptr_[layout_b], off_b, ptrs_b,
-                                                   ldmatrix_ty, smem_ptr_ty, prefetch_latch_to_bb_);
+                                                   ldmatrix_ty, smem_ptr_ty, prefetch_latch_to_bb_, smem_pointee_ty);
       register_lds2(hb, n,   k,   inc, hb0, is_prefetch);
       register_lds2(hb, n+1, k,   inc, hb2, is_prefetch);
       register_lds2(hb, n,   k+1, inc, hb1, is_prefetch);
@@ -2778,12 +2819,15 @@ void generator::visit_fmadot(ir::dot_inst* C, ir::value* A, ir::value* B, ir::va
 //    off_b0i = mul(off_b0i, i32(vec_b));
     off_b[i] = add(mul(off_b0, i32(stride_b0)), mul(off_b1, i32(stride_b1)));
   }
+
+  Type *ty_a = f_mul_add->getFunctionType()->getParamType(0);
+  Type *ty_b = f_mul_add->getFunctionType()->getParamType(1);
   std::vector<Value*> ptrs_a(num_ptr_a);
   for(int i = 0; i < num_ptr_a; i++)
-    ptrs_a[i] = gep(shmems_[A], off_a[i]);
+    ptrs_a[i] = gep(ty_a, shmems_[A], off_a[i]);
   std::vector<Value*> ptrs_b(num_ptr_b);
   for(int i = 0; i < num_ptr_b; i++)
-    ptrs_b[i] = gep(shmems_[B], off_b[i]);
+    ptrs_b[i] = gep(ty_b, shmems_[B], off_b[i]);
 
   std::map<indices_t, Value*> ret = vals_[D];
   std::map<std::pair<int, int>, Value*> has, hbs;
@@ -2799,13 +2843,15 @@ void generator::visit_fmadot(ir::dot_inst* C, ir::value* A, ir::value* B, ir::va
       unsigned mm = (ord[0] == 1) ? ii : jj;
       unsigned nn = (ord[0] == 1) ? jj : ii;
       if(has.find({m + mm, k}) == has.end()){
-        Value* pa = gep(ptrs_a[0], i32((m + mm)*stride_a_m + k*stride_a_k));
-        Value* va = load(pa);
+        Value* pa = gep(ty_a, ptrs_a[0], i32((m + mm)*stride_a_m + k*stride_a_k));
+        // shal1t7
+        Value* va = my_load(f_mul_add->getFunctionType()->getParamType(0), pa);
         has[{m + mm, k}] = va;
       }
       if(hbs.find({n + nn, k}) == hbs.end()){
-        Value* pb = gep(ptrs_b[0], i32((n + nn)*stride_b_n + k*stride_b_k));
-        Value* vb = load(pb);
+        Value* pb = gep(ty_b, ptrs_b[0], i32((n + nn)*stride_b_n + k*stride_b_k));
+        // shal1t7
+        Value* vb = my_load(f_mul_add->getFunctionType()->getParamType(1), pb);
         hbs[{n + nn, k}] = vb;
       }
       ret[idxs_[C].at(z)] = call(f_mul_add, {has[{m+mm,k}], hbs[{n+nn, k}], ret[idxs_[C].at(z)]});
@@ -2987,10 +3033,10 @@ void generator::visit_reducend_inst_fast(ir::reduce_inst* x, acc_fn_t do_acc, Va
     }
     else{
       Value* st_off = add(mul(x_idx, i32(warps_per_inner)), warp_j);
-      call(st_shared, {icmp_eq(lane_j, i32(0)), gep(base, st_off), acc.first});
+      call(st_shared, {icmp_eq(lane_j, i32(0)), gep(cvt(x->get_type()->get_scalar_ty()), base, st_off), acc.first});
       if (with_index) {
         call(st_shared_index,
-            {icmp_eq(lane_j, i32(0)), gep(index_base, st_off), acc.second});
+            {icmp_eq(lane_j, i32(0)), gep(IntegerType::get(*ctx_, 32), index_base, st_off), acc.second});
       }
     }
   }
@@ -3004,9 +3050,9 @@ void generator::visit_reducend_inst_fast(ir::reduce_inst* x, acc_fn_t do_acc, Va
     Value* x_idx = x_idxs.empty() ? builder_->getInt32(0) : x_idxs[0];
     Value* ld_off = add(mul(x_idx, i32(warps_per_inner)), urem(lane_j, i32(warps_per_inner)));
     std::pair<Value*, Value*> acc;
-    acc.first = call(ld_shared, {builder_->getInt1(true), gep(base, ld_off)});
+    acc.first = call(ld_shared, {builder_->getInt1(true), gep(cvt(x->get_type()->get_scalar_ty()), base, ld_off)});
     acc.second = with_index ? call(ld_shared_index, {builder_->getInt1(true),
-                                                     gep(index_base, ld_off)})
+                                                     gep(IntegerType::get(*ctx_, 32), index_base, ld_off)})
                             : nullptr;
     for (int k = warps_per_inner / 2; k > 0; k >>= 1) {
       do_acc(
@@ -3038,12 +3084,16 @@ void generator::visit_reducend_inst(ir::reduce_inst* x, acc_fn_t do_acc, Value *
 
   // reduce within blocks
   auto *data_layout = layouts_->get(layouts_->tmp(x));
+  // shal1t7
+  Type *data_ty = cvt(x->get_type()->get_scalar_ty());
   auto *data_ptr =
       cast_shared_layout_ptr(data_layout, cvt(x->get_type()->get_scalar_ty()));
   auto *index_ptr =
       with_index ? cast_shared_layout_ptr(layouts_->get(layouts_->tmp_index(x)),
                                           IntegerType::get(*ctx_, 32))
                  : data_ptr;
+  // shal1t7
+  Type *index_ty = with_index ? IntegerType::get(*ctx_, 32) : data_ty;
 
   auto shape  = data_layout->get_shape();
   auto order  = data_layout->get_order();
@@ -3055,8 +3105,8 @@ void generator::visit_reducend_inst(ir::reduce_inst* x, acc_fn_t do_acc, Value *
     write_idx[axis] = lane;
     // shared memory write  pointer
     Value *write_off = shared_off(shape, order, write_idx);
-    Value *write_ptr = gep(data_ptr, write_off);
-    Value *index_write_ptr = gep(index_ptr, write_off);
+    Value *write_ptr = gep(data_ty, data_ptr, write_off);
+    Value *index_write_ptr = gep(index_ty, index_ptr, write_off);
     // initialize shared memory
     add_barrier();
     store(acc.first, write_ptr);
@@ -3070,13 +3120,13 @@ void generator::visit_reducend_inst(ir::reduce_inst* x, acc_fn_t do_acc, Value *
       // read pointer
       Value *read_msk = icmp_ult(lane, i32(i));
       Value *read_off = select(read_msk, shared_off(shape, order, idx), i32(0));
-      Value *read_ptr = gep(write_ptr, read_off);
-      Value *index_read_ptr = gep(index_write_ptr, read_off);
+      Value *read_ptr = gep(data_ty, write_ptr, read_off);
+      Value *index_read_ptr = gep(index_ty, index_write_ptr, read_off);
       add_barrier();
       // update accumulator
       do_acc(
-          acc, [&]() -> Value * { return load(read_ptr); },
-          [&]() -> Value * { return load(index_read_ptr); }, false);
+          acc, [&]() -> Value * { return my_load(data_ty, read_ptr); },
+          [&]() -> Value * { return my_load(index_ty, index_read_ptr); }, false);
       add_barrier();
       store(acc.first, write_ptr);
       if (with_index) {
@@ -3092,8 +3142,9 @@ void generator::visit_reducend_inst(ir::reduce_inst* x, acc_fn_t do_acc, Value *
     read_idx.insert(read_idx.begin() + axis, i32(0));
     Value *read_off = shared_off(shape, order, read_idx);
     Value *read_ptr =
-        with_index ? gep(index_ptr, read_off) : gep(data_ptr, read_off);
-    vals_[x][idx] = load(read_ptr);
+        with_index ? gep(index_ty, index_ptr, read_off) : gep(data_ty, data_ptr, read_off);
+    Type *read_ty = with_index ? index_ty : data_ty;
+    vals_[x][idx] = my_load(read_ty, read_ptr);
   };
 }
 
@@ -3203,7 +3254,7 @@ void generator::visit_layout_convert(ir::value *out, ir::value *in){
   Value *base;
   int off = alloc_->offset(layouts_->get(layouts_->tmp(out)));
    // std::cout << off << std::endl;
-  base = gep(shmem_, i32(off));
+  base = gep(Type::getInt8Ty(*ctx_), shmem_, i32(off));
   base = bit_cast(base, ptr_ty(ty, 3));
   std::vector<int> n_reps;
   for(int i = 0; i < shape.size(); i++){
@@ -3243,7 +3294,7 @@ void generator::visit_layout_convert(ir::value *out, ir::value *in){
       // shared mem pointer
       indices_t offs = {in_ax[0][ii], in_ax[1][jj]};
       Value *off  = add(offs[out_ord[0]], mul(out_ld, offs[out_ord[1]]));
-      Value *ptr = gep(base, off);
+      Value *ptr = gep(ty, base, off);
       // stash value to shared mem
       Value* vals = UndefValue::get(vec_ty(ty, in_vec));
       for(int jjj = 0; jjj < in_vec; jjj++){
@@ -3263,10 +3314,10 @@ void generator::visit_layout_convert(ir::value *out, ir::value *in){
       // shared mem pointer
       indices_t offs = {out_ax[0][ii], out_ax[1][jj]};
       Value *off  = add(offs[out_ord[0]], mul(out_ld, offs[out_ord[1]]));
-      Value *ptr = gep(base, off);
+      Value *ptr = gep(ty, base, off);
       ptr = bit_cast(ptr, ptr_ty(vec_ty(ty, out_vec), ptr->getType()->getPointerAddressSpace()));
       // load value from shared rem
-      Value* vals = load(ptr);
+      Value* vals = my_load(vec_ty(ty, out_vec), ptr);
       for(int jjj = 0; jjj < out_vec; jjj++){
         indices_t idxs = {out_ax[0][i*max_ii + ii],
                           out_ax[1][j*max_jj + jj + jjj]};
@@ -3329,7 +3380,7 @@ void generator::visit_masked_load_async_inst(ir::masked_load_async_inst* x){
       Value* off = add(off_0, off_1);
       if(CurrBB != FirstBB)
         builder_->SetInsertPoint(CurrBB);
-      tmp[key] = gep(shmems_[x], {off});
+      tmp[key] = gep(cvt(out_layout->get_type()), shmems_[x], {off});
     }
     shared.push_back({tmp[key], off});
   }
@@ -3436,7 +3487,7 @@ void generator::visit_copy_to_shared_inst(ir::copy_to_shared_inst* cts) {
         off_0 = mul(off_0 , i32(min_vec));
         Value* off = add(off_0, off_1);
         builder_->SetInsertPoint(CurrBB);
-        ptrs[key] = gep(shmems_.at(cts), {off});
+        ptrs[key] = gep(cvt(out_layout->get_type()), shmems_.at(cts), {off});
       }
       int off_0 = id_0 / n_shared_0 * n_shared_0 * mts_0;
       int off_1 = id_1 / n_shared_1 * n_shared_1 * mts_1;
@@ -3445,7 +3496,7 @@ void generator::visit_copy_to_shared_inst(ir::copy_to_shared_inst* cts) {
         off_1 = id_1/n_shared_1*n_shared_1*8;
       }
       int off = (off_1*shapes[in_order[0]] + off_0);
-      Value* ptr = gep(ptrs[key], {i32(off)});
+      Value* ptr = gep(cvt(out_layout->get_type()), ptrs[key], {i32(off)});
       ptr = bit_cast(ptr, current->getType()->getPointerTo(3));
       // asm
       store(current, ptr);
@@ -3644,6 +3695,14 @@ Value *generator::cast_shared_layout_ptr(analysis::data_layout *layout,
   return base;
 }
 
+void addAttribute(Function* fn, unsigned id, Attribute attr) {
+#if LLVM_VERSION_MAJOR >= 15
+  fn->addAttributeAtIndex(id, attr);
+#else
+  fn->addAttribute(id, attr);
+#endif
+}
+
 void generator::visit_function(ir::function* fn) {
   idxs_.clear();
   vals_.clear();
@@ -3660,7 +3719,7 @@ void generator::visit_function(ir::function* fn) {
     if(attr.is_llvm_attr()){
       llvm::Attribute llattr = cvt(attr);
       if(llattr.getKindAsEnum() != llvm::Attribute::None)
-        ret->addAttribute(id, cvt(attr));
+        addAttribute(ret, id, llattr);
     }
   }
   // set metadata
@@ -3863,7 +3922,7 @@ void generator::visit_layout_shared(analysis::shared_layout* layout) {
   PointerType *ptr_ty = ty->getPointerTo(shmem_->getType()->getPointerAddressSpace());
   if (layout->get_N_buffer()) {
     // create pointers
-    shared_pre_ptr_[layout] = gep(shmem_, i32(alloc_->offset(layout)));
+    shared_pre_ptr_[layout] = gep(Type::getInt8Ty(*ctx_), shmem_, i32(alloc_->offset(layout)));
     shared_pre_ptr_[layout] = bit_cast(shared_pre_ptr_[layout], ptr_ty);
 
     BasicBlock *current = builder_->GetInsertBlock();
@@ -3900,14 +3959,14 @@ void generator::visit_layout_shared(analysis::shared_layout* layout) {
       builder_->SetInsertPoint(&*parent->getFirstNonPHI());
     // create pointers
     shared_ptr_[layout] = phi(ptr_ty, 2);
-    shared_pre_ptr_[layout] = gep(shmem_, i32(alloc_->offset(layout)));
+    shared_pre_ptr_[layout] = gep(Type::getInt8Ty(*ctx_), shmem_, i32(alloc_->offset(layout)));
     shared_pre_ptr_[layout] = bit_cast(shared_pre_ptr_[layout], shared_ptr_[layout]->getType());
     shared_off_[layout] = phi(i32_ty, 2);
-    shared_next_ptr_[layout] = gep(shared_ptr_[layout], shared_off_[layout], "next_ptr");
+    shared_next_ptr_[layout] = gep(cvt(layout->get_type()), shared_ptr_[layout], shared_off_[layout], "next_ptr");
     builder_->SetInsertPoint(current);
   } else{
     size_t offset = alloc_->offset(layout);
-    shared_ptr_[layout] = gep(shmem_, i32(offset));
+    shared_ptr_[layout] = gep(Type::getInt8Ty(*ctx_), shmem_, i32(offset));
     shared_ptr_[layout] = bit_cast(shared_ptr_[layout], ptr_ty);
   }
 }
@@ -4046,14 +4105,14 @@ void generator::finalize_shared_layout(analysis::shared_layout *shared) {
 
     BasicBlock *current = builder_->GetInsertBlock();
     builder_->SetInsertPoint(header->getTerminator());
-    Value *next_ptr_header = gep(shared_pre_ptr_[shared], i32(shared->get_per_stage_elements()));
+    Value *next_ptr_header = gep(cvt(shared->get_type()), shared_pre_ptr_[shared], i32(shared->get_per_stage_elements()));
     builder_->SetInsertPoint(current->getTerminator());
 
     assert(isa<PHINode>(shared_next_ptr_[shared]));
     static_cast<PHINode*>(shared_next_ptr_[shared])->addIncoming(next_ptr_header, header);
 
     Value *lds_offset = mul(read_smem_idx_[shared], i32(shared->get_per_stage_elements()));
-    Value *next_ptr = gep(shared_pre_ptr_[shared], lds_offset);
+    Value *next_ptr = gep(cvt(shared->get_type()), shared_pre_ptr_[shared], lds_offset);
     static_cast<PHINode*>(shared_next_ptr_[shared])->addIncoming(next_ptr, loop);
   } else if(shared->get_double_buffer()) {
     auto info = *shared->get_double_buffer();
