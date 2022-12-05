@@ -887,7 +887,6 @@ def _compile(fn, signature: str, device: int = -1, constants=dict(),
              output: str = "ttgir", cc=0) -> Tuple[str, int, str]:
     valid_outputs = ("ttir", "ttgir", "ptx", "cubin")
     assert output in valid_outputs, "output should be one of [%s], but get \"%s\"" % (','.join(valid_outputs), output)
-
     # triton-ir
     module, _ = make_triton_ir(fn, signature, specialization, constants)
     if output == "ttir":
@@ -934,7 +933,7 @@ def binary_name_to_header_name(name):
     return f"{name}.h"
 
 
-def generate_launcher(identifier, constants, signature):
+def generate_format_str(signature, constants):
     arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items())
 
     def _extracted_type(ty):
@@ -964,12 +963,28 @@ def generate_launcher(identifier, constants, signature):
             "int64_t": "L",
         }[ty]
 
-    format = "iiiiiKKOOO" + ''.join([format_of(_extracted_type(ty)) for ty in signature.values()])
+    PREFIX = 'ssiiiiiKKOOO'
+    format_str = PREFIX + ''.join([format_of(_extracted_type(ty)) for ty in signature.values()])
+    is_const_str = 'N' * len(PREFIX) + ''.join(['C' if i in constants else 'N' for i in signature.keys()])
+    return format_str, is_const_str
 
+def generate_launcher(identifier):
     # generate glue code
     src = f"""
 #include \"cuda.h\"
 #include <Python.h>
+
+union ArgUnion {{
+  PyObject* O;
+  float f;
+  double d;
+  long l;
+  uint32_t I;
+  int32_t i;
+  uint64_t K;
+  int64_t L;
+  CUdeviceptr CUdptr;
+}};
 
 static inline void gpuAssert(CUresult code, const char *file, int line)
 {{
@@ -986,13 +1001,12 @@ static inline void gpuAssert(CUresult code, const char *file, int line)
 }}
 #define CUDA_CHECK(ans) {{ gpuAssert((ans), __FILE__, __LINE__); }}
 
-
-void _launch(int gridX, int gridY, int gridZ, int num_warps, int shared_memory, CUstream stream, CUfunction function, {arg_decls}) {{
-  void *params[] = {{ {', '.join(f"&arg{i}" for i in signature.keys() if i not in constants)} }};
+void my_launch(int gridX, int gridY, int gridZ, int num_warps, int shared_memory, CUstream stream, CUfunction function, void **params) {{
   if(gridX*gridY*gridZ > 0){{
     CUDA_CHECK(cuLaunchKernel(function, gridX, gridY, gridZ, 32*num_warps, 1, 1, shared_memory, stream, params, 0));
   }}
 }}
+
 
 
 static inline CUdeviceptr getPointer(PyObject *obj, int idx) {{
@@ -1019,6 +1033,8 @@ static inline CUdeviceptr getPointer(PyObject *obj, int idx) {{
 
 
 static PyObject* launch(PyObject* self, PyObject* args) {{
+  char *format = (char*)PyUnicode_AsUTF8(PyTuple_GetItem(args, 0));
+  char *is_const = (char*)PyUnicode_AsUTF8(PyTuple_GetItem(args, 1));
   int gridX, gridY, gridZ;
   uint64_t _stream;
   uint64_t _function;
@@ -1028,10 +1044,122 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   PyObject *launch_exit_hook = NULL;
   PyObject *compiled_kernel = NULL;
   PyObject *hook_ret = NULL;
-  {' '.join([f"{_extracted_type(ty)} _arg{i}; " for i, ty in signature.items()])}
-  if(!PyArg_ParseTuple(args, \"{format}\", &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, {', '.join(f"&_arg{i}" for i, ty in signature.items())})) {{
+
+  int ArgC = strlen(format) - strlen("ssiiiiiKKOOO");
+  union ArgUnion MyArgs[100];
+
+  if (0)
+    printf(\"shal1t7 ArgC = %d\\n\", ArgC);
+
+  if (0)
+    printf(\"shal1t7 format = %s\\n\", format);
+
+  if (0)
+    printf(\"shal1t7  is_const = %s\\n\", is_const);
+
+  char *arg0;
+  char *arg1;
+
+
+  if(ArgC == 1 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0])) {{
     return NULL;
   }}
+
+  if(ArgC == 2 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 3 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 4 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 5 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 6 && !PyArg_ParseTuple(args, format, &arg0, &arg1, &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 7 && !PyArg_ParseTuple(args, format, &arg0, &arg1,  &gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 8 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 9 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 10 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 11 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 12 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 13 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 14 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12], 
+  &MyArgs[13])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 15 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12], 
+  &MyArgs[13], &MyArgs[14])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 16 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12], 
+  &MyArgs[13], &MyArgs[14], &MyArgs[15])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 17 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12], 
+  &MyArgs[13], &MyArgs[14], &MyArgs[15], &MyArgs[16])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 18 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12],
+  &MyArgs[13], &MyArgs[14], &MyArgs[15], &MyArgs[16], &MyArgs[17])) {{
+    return NULL;
+  }}
+
+  if(ArgC == 19 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12],
+  &MyArgs[13], &MyArgs[14], &MyArgs[15], &MyArgs[16], &MyArgs[17], &MyArgs[18])) {{
+    return NULL;
+  }}
+
+
+  if(ArgC == 20 && !PyArg_ParseTuple(args, format, &arg0, &arg1,&gridX, &gridY, &gridZ, &num_warps, &shared_memory, &_stream, &_function, &launch_enter_hook, &launch_exit_hook, &compiled_kernel, &MyArgs[0],  &MyArgs[1], &MyArgs[2], &MyArgs[3], &MyArgs[4], &MyArgs[5], &MyArgs[6], &MyArgs[7], &MyArgs[8], &MyArgs[9], &MyArgs[10], &MyArgs[11], &MyArgs[12],
+  &MyArgs[13], &MyArgs[14], &MyArgs[15], &MyArgs[16], &MyArgs[17], &MyArgs[18], &MyArgs[19])) {{
+    return NULL;
+  }}
+
+
+
+  if(ArgC >= 21)
+     abort();
+
+
 
   if (launch_enter_hook != Py_None) {{
     PyObject *new_args = PyTuple_Pack(1, compiled_kernel);
@@ -1039,7 +1167,16 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
     Py_DECREF(new_args);
   }}
 
-  _launch(gridX, gridY, gridZ, num_warps, shared_memory, (CUstream)_stream, (CUfunction)_function, {', '.join(f"getPointer(_arg{i},{i})" if ty[0]=="*" else f"_arg{i}"for i, ty in signature.items())});
+  for (int index = 0; index < ArgC; ++index)
+    if (format[strlen("ssiiiiiKKOOO") + index] == 'O')
+       MyArgs[index].CUdptr = getPointer(MyArgs[index].O, index);
+
+  void* params[100];
+  for (int index = 0, param_index = 0; index < ArgC; ++index)
+    if (is_const[strlen("ssiiiiiKKOOO") + index] == 'N')
+      params[param_index++] = &MyArgs[index];
+
+  my_launch(gridX, gridY, gridZ, num_warps, shared_memory, (CUstream)_stream, (CUfunction)_function, params);
 
   if (launch_exit_hook != Py_None) {{
     PyObject *new_args = NULL;
@@ -1085,7 +1222,6 @@ PyMODINIT_FUNC PyInit_launcher(void) {{
   return m;
 }}
 """
-
     return src
 
 
@@ -1156,6 +1292,7 @@ def _build(name, src, srcdir):
     cu_include_dir = os.path.join(cuda_home_dirs(), "include")
     suffix = sysconfig.get_config_var('EXT_SUFFIX')
     so = os.path.join(srcdir, '{name}{suffix}'.format(name=name, suffix=suffix))
+
     # try to avoid setuptools if possible
     cc = os.environ.get("CC")
     if cc is None:
@@ -1229,10 +1366,11 @@ def compile(fn, signature: str, device: int = -1, constants=dict(), num_warps: i
     so_cache_key = make_so_cache_key(triton.runtime.jit.version_key(), signature, constants)
     so_cache_manager = CacheManager(so_cache_key)
     so_name = f"{name}.so"
+    format_str, is_const_str = generate_format_str(signature, constants)
     # retrieve stub from cache if it exists
     if not so_cache_manager.has_file(so_name):
         with tempfile.TemporaryDirectory() as tmpdir:
-            src = generate_launcher(name, constants, signature)
+            src = generate_launcher(name)
             src_path = os.path.join(tmpdir, "main.c")
             with open(src_path, "w") as f:
                 f.write(src)
@@ -1265,7 +1403,7 @@ def compile(fn, signature: str, device: int = -1, constants=dict(), num_warps: i
     if warm_cache_only:
         return  # load_binary() requires a valid cuda context
 
-    return CompiledKernel(name, so_cache_manager._make_path(so_name), fn_cache_manager.cache_dir, device)
+    return CompiledKernel(name, format_str, is_const_str, so_cache_manager._make_path(so_name), fn_cache_manager.cache_dir, device)
 
 
 class CompiledKernel:
@@ -1274,7 +1412,9 @@ class CompiledKernel:
     launch_enter_hook = None
     launch_exit_hook = None
 
-    def __init__(self, fn_name, so_path, cache_dir, device):
+    def __init__(self, fn_name, format_str, is_const_str, so_path, cache_dir, device):
+        self.format_str = format_str
+        self.is_const_str = is_const_str
         # initialize launcher
         import importlib.util
         spec = importlib.util.spec_from_file_location("launcher", so_path)
@@ -1309,8 +1449,8 @@ class CompiledKernel:
         def runner(*args, stream=None):
             if stream is None:
                 stream = torch.cuda.current_stream().cuda_stream
-            self.c_wrapper(grid[0], grid[1], grid[2], self.num_warps, self.shared, stream, self.cu_function,
-                           CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, self, *args)
+            self.c_wrapper(self.format_str, self.is_const_str, grid[0], grid[1], grid[2], self.num_warps, self.shared, stream,
+                           self.cu_function, CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, self, *args)
         return runner
 
     def get_sass(self, fun=None):
